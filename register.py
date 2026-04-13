@@ -18,7 +18,7 @@ import logging
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from playwright_stealth import stealth_async  # 核心：隐匿指纹注入
+from playwright_stealth import Stealth  # 核心修正：导入最新的 Stealth 类
 
 # 配置日志双写：强制物理落盘 + 终端输出
 logging.basicConfig(
@@ -198,9 +198,12 @@ class GeminiRegistrar:
                     bypass_csp=True
                 )
                 
+                # 核心修正：适配最新 playwright-stealth v2.0+ API
+                # 将隐匿特征直接挂载到 Context 级，抹除所有衍生 Page 的指纹
+                stealth = Stealth()
+                await stealth.apply_stealth_async(context)
+                
                 self.page = await context.new_page()
-                # 核心：注入深度反侦察环境，彻底抹除 Webdriver、补全硬件画布特征
-                await stealth_async(self.page)
                 
                 logger.info("正在打开注册页面...")
                 await self.page.goto('https://business.gemini.com', wait_until='networkidle')
@@ -208,14 +211,14 @@ class GeminiRegistrar:
                 logger.info(f"正在输入邮箱: {email}")
                 await self.page.wait_for_selector('#email-input', timeout=30000)
                 
-                # 拟人化交互：先聚焦，再模拟键入，确保 React/Wiz 底层事件监听器被激活
+                # 拟人化交互
                 await self.page.locator('#email-input').click()
                 await self.page.locator('#email-input').type(email, delay=120)
                 await asyncio.sleep(2)
                 
                 await self.page.click('#log-in-button')
                 logger.info("已点击登录按钮，等待目标站点响应...")
-                await asyncio.sleep(6)  # 留足时间让 Google SSO 判断指纹
+                await asyncio.sleep(6)
                 
                 debug_img = f"debug_screenshot_{email.split('@')[0]}.png"
                 await self.page.screenshot(path=debug_img, full_page=True)
