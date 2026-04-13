@@ -1,5 +1,4 @@
-name: Account Registration
-
+name: Gemini Business Account Registration
 on:
   workflow_dispatch:
     inputs:
