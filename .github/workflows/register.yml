@@ -1,4 +1,4 @@
-name: Gemini Business Account Registration
+name: Account Registration
 
 on:
   workflow_dispatch:
@@ -32,10 +32,10 @@ jobs:
     
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       
       - name: 设置 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       
@@ -63,8 +63,9 @@ jobs:
       
       - name: 保存日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: registration-log-${{ github.run_number }}
           path: "*.log"
+          if-no-files-found: error
           retention-days: 7
