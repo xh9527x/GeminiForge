@@ -57,7 +57,6 @@ class CredentialData:
     
     def to_dict(self) -> dict:
         """导出为同步格式"""
-        # GitHub Actions运行在UTC时区，转换为北京时间(+8)后再加12小时有效期
         expires_at = (datetime.now() + timedelta(hours=20)).strftime("%Y-%m-%d %H:%M:%S")
         return {
             "id": self.email,
@@ -77,12 +76,10 @@ class EmailManager:
     """邮箱管理器"""
     
     def __init__(self, worker_domain: str, email_domain: str, admin_password: str):
-        # 防御性清洗：强制剥离可能存在的协议头和末尾斜杠
         self.worker_domain = re.sub(r'^https?://', '', worker_domain).rstrip('/')
         self.email_domain = email_domain
         self.admin_password = admin_password
         
-        # 配置Session
         self.session = requests.Session()
         adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5)
         self.session.mount('http://', adapter)
@@ -90,7 +87,6 @@ class EmailManager:
         self.session.headers.update({'Connection': 'keep-alive'})
     
     def _update_proxy(self):
-        """动态更新代理设置（仅在PROXY_EMAIL=true时启用）"""
         use_proxy_for_email = os.environ.get('PROXY_EMAIL', '').lower() == 'true'
         if not use_proxy_for_email:
             return  
@@ -101,9 +97,7 @@ class EmailManager:
             logger.info(f"EmailManager 使用代理: {proxy[:30]}...")
     
     def create_email(self, max_retries: int = 3) -> tuple:
-        """创建邮箱"""
         import string
-        
         self._update_proxy()
         
         letters1 = ''.join(random.choices(string.ascii_lowercase, k=4))
@@ -131,7 +125,6 @@ class EmailManager:
         return None, None
     
     def check_verification_code(self, email: str, max_retries: int = 20) -> Optional[str]:
-        """检查验证码"""
         self._update_proxy()
         
         for i in range(max_retries):
@@ -184,7 +177,6 @@ class GeminiRegistrar:
         self.page = None
     
     async def register(self) -> bool:
-        """执行注册流程"""
         from playwright.async_api import async_playwright
         
         try:
@@ -196,7 +188,17 @@ class GeminiRegistrar:
             
             logger.info("正在启动浏览器...")
             async with async_playwright() as p:
-                launch_args = {'headless': True}
+                # 注入强效的反自动化侦测参数
+                launch_args = {
+                    'headless': True,
+                    'args': [
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-infobars',
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--window-size=1920,1080'
+                    ]
+                }
                 
                 browser_proxy = os.environ.get('PROXY', '') or PROXY
                 if browser_proxy:
@@ -212,8 +214,13 @@ class GeminiRegistrar:
                 self.browser = await p.chromium.launch(**launch_args)
                 context = await self.browser.new_context(
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
-                    viewport={'width': 1920, 'height': 1080}
+                    viewport={'width': 1920, 'height': 1080},
+                    java_script_enabled=True,
+                    bypass_csp=True
                 )
+                # 覆盖 Webdriver 标识
+                await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                
                 self.page = await context.new_page()
                 
                 logger.info("正在打开注册页面...")
@@ -221,20 +228,28 @@ class GeminiRegistrar:
                 
                 logger.info(f"正在输入邮箱: {email}")
                 await self.page.wait_for_selector('#email-input', timeout=30000)
-                await self.page.fill('#email-input', email)
-                await asyncio.sleep(1)
-                
-                await self.page.click('#log-in-button')
+                # 模拟人类打字延迟
+                await self.page.type('#email-input', email, delay=100)
                 await asyncio.sleep(2)
+                
+                # 点击继续并等待页面响应
+                await self.page.click('#log-in-button')
+                logger.info("已点击登录按钮，等待目标站点响应...")
+                await asyncio.sleep(5)
+                
+                # 建立视觉观测探针：截取当前屏幕状态
+                debug_img = f"debug_screenshot_{email.split('@')[0]}.png"
+                await self.page.screenshot(path=debug_img, full_page=True)
+                logger.info(f"⚠️ 已保存交互后屏幕快照: {debug_img} (若收不到验证码，请务必查看此图分析是否被阻断)")
                 
                 logger.info("正在等待验证码...")
                 code = self.email_manager.check_verification_code(email)
                 if not code:
-                    raise Exception("未收到验证码")
+                    raise Exception("未收到验证码，请检查流水线 Artifacts 中的截图")
                 
                 logger.info(f"正在输入验证码: {code}")
                 await self.page.wait_for_selector('input[name="pinInput"]', timeout=30000)
-                await self.page.fill('input[name="pinInput"]', code)
+                await self.page.type('input[name="pinInput"]', code, delay=100)
                 await asyncio.sleep(1)
                 
                 await self.page.click('button[jsname="XooR8e"]')
@@ -243,7 +258,7 @@ class GeminiRegistrar:
                 logger.info("正在输入姓名...")
                 await self.page.wait_for_selector('input[formcontrolname="fullName"]', timeout=15000)
                 fullname = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
-                await self.page.fill('input[formcontrolname="fullName"]', fullname)
+                await self.page.type('input[formcontrolname="fullName"]', fullname, delay=100)
                 await asyncio.sleep(1)
                 
                 await self.page.click('button.agree-button')
@@ -284,7 +299,6 @@ class CredentialSyncer:
     """凭证同步器"""
     
     def __init__(self, base_url: str, admin_key: str):
-        # 防御性补全 SYNC_URL 协议头
         base_url = base_url.rstrip('/')
         if not base_url.startswith(('http://', 'https://')):
             base_url = f"https://{base_url}"
@@ -298,14 +312,12 @@ class CredentialSyncer:
         self.session.headers.update({'Connection': 'keep-alive'})
     
     def _update_proxy(self):
-        """动态更新代理设置"""
         proxy = os.environ.get('PROXY', '') or PROXY
         if proxy and not self.session.proxies:
             self.session.proxies = {'http': proxy, 'https': proxy}
             logger.info(f"CredentialSyncer 使用代理: {proxy[:30]}...")
     
     def _request(self, method: str, url: str, **kwargs):
-        """带重试的请求"""
         self._update_proxy()
         for attempt in range(3):
             try:
@@ -317,7 +329,6 @@ class CredentialSyncer:
         return None
     
     def sync(self, new_accounts: List[Dict]) -> bool:
-        """执行同步"""
         try:
             logger.info("步骤 1/4: 登录...")
             res = self._request('post', f"{self.base_url}/login", 
@@ -357,7 +368,6 @@ class CredentialSyncer:
 
 
 async def register_worker(worker_id: int, email_config: Dict) -> Optional[Dict]:
-    """注册工作函数"""
     logger.info(f"[Worker-{worker_id}] 开始注册...")
     registrar = GeminiRegistrar(email_config)
     
@@ -371,7 +381,6 @@ async def register_worker(worker_id: int, email_config: Dict) -> Optional[Dict]:
 
 
 async def register_worker_with_sem(sem: asyncio.Semaphore, worker_id: int, email_config: Dict) -> Optional[Dict]:
-    """带有物理并发阀门的工作包装器"""
     async with sem:
         return await register_worker(worker_id, email_config)
 
@@ -381,7 +390,6 @@ async def main():
     proxy_process = None
     
     try:
-        # 启动VLESS代理（如果配置了）
         vless_config = os.environ.get('VLESS_CONFIG', '')
         if vless_config:
             try:
@@ -429,7 +437,6 @@ async def main():
                 if i < count - 1:
                     await asyncio.sleep(random.randint(3, 6))
         else:
-            # 建立真实并发阀门，防止瞬间拉起过多浏览器导致 OOM
             sem = asyncio.Semaphore(concurrent)
             tasks = [register_worker_with_sem(sem, i + 1, email_config) for i in range(count)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -449,7 +456,6 @@ async def main():
             print("没有成功注册的账号，跳过同步")
             
     finally:
-        # 生命期接管：强杀底层的僵尸进程
         if proxy_process:
             logger.info("执行清理: 终止后台 sing-box 进程...")
             proxy_process.terminate()
