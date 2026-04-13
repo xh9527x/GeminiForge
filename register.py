@@ -29,12 +29,17 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# 配置日志
+# 配置日志双写：强制物理落盘 + 终端输出
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    filename='registration.log',
+    filemode='a'
 )
+console = logging.StreamHandler()
+console.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logging.getLogger('').addHandler(console)
 logger = logging.getLogger(__name__)
 
 # 全局代理配置
@@ -72,7 +77,8 @@ class EmailManager:
     """邮箱管理器"""
     
     def __init__(self, worker_domain: str, email_domain: str, admin_password: str):
-        self.worker_domain = worker_domain
+        # 防御性清洗：强制剥离可能存在的协议头和末尾斜杠
+        self.worker_domain = re.sub(r'^https?://', '', worker_domain).rstrip('/')
         self.email_domain = email_domain
         self.admin_password = admin_password
         
@@ -85,10 +91,9 @@ class EmailManager:
     
     def _update_proxy(self):
         """动态更新代理设置（仅在PROXY_EMAIL=true时启用）"""
-        # 邮件API默认不走代理，除非明确设置PROXY_EMAIL=true
         use_proxy_for_email = os.environ.get('PROXY_EMAIL', '').lower() == 'true'
         if not use_proxy_for_email:
-            return  # 邮件API不使用代理
+            return  
         
         proxy = os.environ.get('PROXY', '') or PROXY
         if proxy and not self.session.proxies:
@@ -99,7 +104,6 @@ class EmailManager:
         """创建邮箱"""
         import string
         
-        # 动态更新代理设置
         self._update_proxy()
         
         letters1 = ''.join(random.choices(string.ascii_lowercase, k=4))
@@ -128,7 +132,6 @@ class EmailManager:
     
     def check_verification_code(self, email: str, max_retries: int = 20) -> Optional[str]:
         """检查验证码"""
-        # 动态更新代理设置
         self._update_proxy()
         
         for i in range(max_retries):
@@ -185,26 +188,20 @@ class GeminiRegistrar:
         from playwright.async_api import async_playwright
         
         try:
-            # 1. 创建邮箱
             logger.info("正在创建邮箱...")
             jwt, email = self.email_manager.create_email()
             if not email:
                 raise Exception("创建邮箱失败")
             self.credential.email = email
             
-            # 2. 启动浏览器
             logger.info("正在启动浏览器...")
             async with async_playwright() as p:
-                # 配置浏览器代理
                 launch_args = {'headless': True}
                 
-                # 从环境变量读取代理（VLESS启动后会设置）
                 browser_proxy = os.environ.get('PROXY', '') or PROXY
                 if browser_proxy:
-                    # 解析代理地址
                     from urllib.parse import urlparse
                     proxy_parsed = urlparse(browser_proxy)
-                    # Playwright 需要的格式
                     proxy_config = {'server': f"http://{proxy_parsed.hostname}:{proxy_parsed.port}"}
                     if proxy_parsed.username:
                         proxy_config['username'] = proxy_parsed.username
@@ -219,52 +216,42 @@ class GeminiRegistrar:
                 )
                 self.page = await context.new_page()
                 
-                # 3. 打开注册页面
                 logger.info("正在打开注册页面...")
                 await self.page.goto('https://business.gemini.google', wait_until='networkidle')
                 
-                # 4. 输入邮箱
                 logger.info(f"正在输入邮箱: {email}")
                 await self.page.wait_for_selector('#email-input', timeout=30000)
                 await self.page.fill('#email-input', email)
                 await asyncio.sleep(1)
                 
-                # 5. 点击继续
                 await self.page.click('#log-in-button')
                 await asyncio.sleep(2)
                 
-                # 6. 获取验证码
                 logger.info("正在等待验证码...")
                 code = self.email_manager.check_verification_code(email)
                 if not code:
                     raise Exception("未收到验证码")
                 
-                # 7. 输入验证码
                 logger.info(f"正在输入验证码: {code}")
                 await self.page.wait_for_selector('input[name="pinInput"]', timeout=30000)
                 await self.page.fill('input[name="pinInput"]', code)
                 await asyncio.sleep(1)
                 
-                # 8. 点击验证
                 await self.page.click('button[jsname="XooR8e"]')
                 await asyncio.sleep(3)
                 
-                # 9. 输入姓名
                 logger.info("正在输入姓名...")
                 await self.page.wait_for_selector('input[formcontrolname="fullName"]', timeout=15000)
                 fullname = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
                 await self.page.fill('input[formcontrolname="fullName"]', fullname)
                 await asyncio.sleep(1)
                 
-                # 10. 点击同意
                 await self.page.click('button.agree-button')
                 
-                # 11. 等待跳转
                 logger.info("正在等待页面跳转...")
                 await self.page.wait_for_url(re.compile(r'business\.gemini\.google/home/cid/'), timeout=90000)
                 await asyncio.sleep(3)
                 
-                # 12. 提取数据
                 logger.info("正在提取凭证数据...")
                 cookies = await context.cookies()
                 for cookie in cookies:
@@ -297,7 +284,12 @@ class CredentialSyncer:
     """凭证同步器"""
     
     def __init__(self, base_url: str, admin_key: str):
-        self.base_url = base_url.rstrip('/')
+        # 防御性补全 SYNC_URL 协议头
+        base_url = base_url.rstrip('/')
+        if not base_url.startswith(('http://', 'https://')):
+            base_url = f"https://{base_url}"
+        self.base_url = base_url
+        
         self.admin_key = admin_key
         self.session = requests.Session()
         adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10)
@@ -314,7 +306,7 @@ class CredentialSyncer:
     
     def _request(self, method: str, url: str, **kwargs):
         """带重试的请求"""
-        self._update_proxy()  # 动态更新代理
+        self._update_proxy()
         for attempt in range(3):
             try:
                 return getattr(self.session, method)(url, timeout=30, **kwargs)
@@ -327,7 +319,6 @@ class CredentialSyncer:
     def sync(self, new_accounts: List[Dict]) -> bool:
         """执行同步"""
         try:
-            # 1. 登录
             logger.info("步骤 1/4: 登录...")
             res = self._request('post', f"{self.base_url}/login", 
                 data={'admin_key': self.admin_key},
@@ -337,13 +328,11 @@ class CredentialSyncer:
                 return False
             logger.info("✅ 登录成功")
             
-            # 2. 获取现有凭证
             logger.info("步骤 2/4: 获取现有凭证...")
             res = self._request('get', f"{self.base_url}/admin/accounts-config")
             existing = res.json().get('accounts', []) if res.status_code == 200 else []
             logger.info(f"获取到 {len(existing)} 个现有账户")
             
-            # 3. 合并凭证
             logger.info("步骤 3/4: 合并凭证...")
             accounts_dict = {a['id']: a for a in existing if a.get('id')}
             for account in new_accounts:
@@ -352,7 +341,6 @@ class CredentialSyncer:
             merged = list(accounts_dict.values())
             logger.info(f"合并后共 {len(merged)} 个账户")
             
-            # 4. 上传
             logger.info("步骤 4/4: 上传凭证...")
             res = self._request('put', f"{self.base_url}/admin/accounts-config",
                 json=merged, headers={'Content-Type': 'application/json'})
@@ -382,81 +370,90 @@ async def register_worker(worker_id: int, email_config: Dict) -> Optional[Dict]:
         return None
 
 
+async def register_worker_with_sem(sem: asyncio.Semaphore, worker_id: int, email_config: Dict) -> Optional[Dict]:
+    """带有物理并发阀门的工作包装器"""
+    async with sem:
+        return await register_worker(worker_id, email_config)
+
+
 async def main():
-    global PROXY  # 允许proxy_helper更新全局代理
-    
-    # 启动VLESS代理（如果配置了）
+    global PROXY
     proxy_process = None
-    vless_config = os.environ.get('VLESS_CONFIG', '')
-    if vless_config:
-        try:
-            from proxy_helper import setup_proxy
-            logger.info("正在启动VLESS代理...")
-            proxy_process = setup_proxy()
-            if proxy_process:
-                # 更新全局PROXY变量
-                PROXY = os.environ.get('PROXY', '')
-                logger.info(f"VLESS代理已启动: {PROXY}")
-        except Exception as e:
-            logger.warning(f"VLESS代理启动失败: {e}")
     
-    # 从环境变量读取配置
-    email_config = {
-        'worker_domain': os.environ.get('WORKER_DOMAIN', ''),
-        'email_domain': os.environ.get('EMAIL_DOMAIN', ''),
-        'admin_password': os.environ.get('ADMIN_PASSWORD', '')
-    }
-    
-    sync_url = os.environ.get('SYNC_URL', '')
-    sync_key = os.environ.get('SYNC_KEY', '')
-    count = int(os.environ.get('REGISTER_COUNT', '1'))
-    concurrent = int(os.environ.get('CONCURRENT', '1'))
-    
-    # 验证配置
-    if not all([email_config['worker_domain'], email_config['email_domain'], email_config['admin_password']]):
-        logger.error("❌ 缺少邮箱配置环境变量!")
-        sys.exit(1)
-    
-    if not sync_url or not sync_key:
-        logger.error("❌ 缺少同步API配置!")
-        sys.exit(1)
-    
-    print(f"\n{'='*50}")
-    print(f"  Gemini Business 注册机 (GitHub Actions)")
-    print(f"  计划注册: {count} 个账号")
-    print(f"  并发数: {concurrent}")
-    print(f"{'='*50}\n")
-    
-    # 执行注册
-    credentials = []
-    
-    if concurrent == 1:
-        # 串行
-        for i in range(count):
-            cred = await register_worker(i + 1, email_config)
-            if cred:
-                credentials.append(cred)
-            if i < count - 1:
-                await asyncio.sleep(random.randint(3, 6))
-    else:
-        # 并发
-        tasks = [register_worker(i + 1, email_config) for i in range(count)]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        credentials = [r for r in results if isinstance(r, dict)]
-    
-    print(f"\n注册完成: 成功 {len(credentials)} 个\n")
-    
-    # 同步到远程
-    if credentials:
-        print("开始同步到远程API...\n")
-        syncer = CredentialSyncer(sync_url, sync_key)
-        if syncer.sync(credentials):
-            print("\n✅ 全部完成!")
-        else:
-            print("\n❌ 同步失败!")
+    try:
+        # 启动VLESS代理（如果配置了）
+        vless_config = os.environ.get('VLESS_CONFIG', '')
+        if vless_config:
+            try:
+                from proxy_helper import setup_proxy
+                logger.info("正在启动VLESS代理...")
+                proxy_process = setup_proxy()
+                if proxy_process:
+                    PROXY = os.environ.get('PROXY', '')
+                    logger.info(f"VLESS代理已启动: {PROXY}")
+            except Exception as e:
+                logger.warning(f"VLESS代理启动失败: {e}")
+        
+        email_config = {
+            'worker_domain': os.environ.get('WORKER_DOMAIN', ''),
+            'email_domain': os.environ.get('EMAIL_DOMAIN', ''),
+            'admin_password': os.environ.get('ADMIN_PASSWORD', '')
+        }
+        
+        sync_url = os.environ.get('SYNC_URL', '')
+        sync_key = os.environ.get('SYNC_KEY', '')
+        count = int(os.environ.get('REGISTER_COUNT', '1'))
+        concurrent = int(os.environ.get('CONCURRENT', '1'))
+        
+        if not all([email_config['worker_domain'], email_config['email_domain'], email_config['admin_password']]):
+            logger.error("❌ 缺少邮箱配置环境变量!")
             sys.exit(1)
-    else:
-        print("没有成功注册的账号，跳过同步")
+        
+        if not sync_url or not sync_key:
+            logger.error("❌ 缺少同步API配置!")
+            sys.exit(1)
+        
+        print(f"\n{'='*50}")
+        print(f"  Gemini Business 注册机 (GitHub Actions)")
+        print(f"  计划注册: {count} 个账号")
+        print(f"  并发数: {concurrent}")
+        print(f"{'='*50}\n")
+        
+        credentials = []
+        
+        if concurrent <= 1:
+            for i in range(count):
+                cred = await register_worker(i + 1, email_config)
+                if cred:
+                    credentials.append(cred)
+                if i < count - 1:
+                    await asyncio.sleep(random.randint(3, 6))
+        else:
+            # 建立真实并发阀门，防止瞬间拉起过多浏览器导致 OOM
+            sem = asyncio.Semaphore(concurrent)
+            tasks = [register_worker_with_sem(sem, i + 1, email_config) for i in range(count)]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            credentials = [r for r in results if isinstance(r, dict)]
+        
+        print(f"\n注册完成: 成功 {len(credentials)} 个\n")
+        
+        if credentials:
+            print("开始同步到远程API...\n")
+            syncer = CredentialSyncer(sync_url, sync_key)
+            if syncer.sync(credentials):
+                print("\n✅ 全部完成!")
+            else:
+                print("\n❌ 同步失败!")
+                sys.exit(1)
+        else:
+            print("没有成功注册的账号，跳过同步")
+            
+    finally:
+        # 生命期接管：强杀底层的僵尸进程
+        if proxy_process:
+            logger.info("执行清理: 终止后台 sing-box 进程...")
+            proxy_process.terminate()
+            proxy_process.wait(timeout=3)
 
 
 if __name__ == '__main__':
