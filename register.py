@@ -185,7 +185,6 @@ class GeminiRegistrar:
             if not email:
                 raise Exception("创建邮箱失败")
             self.credential.email = email
-            email_prefix = email.split('@')[0]
             
             logger.info("正在启动浏览器...")
             async with async_playwright() as p:
@@ -225,20 +224,13 @@ class GeminiRegistrar:
                 self.page = await context.new_page()
                 
                 logger.info("正在打开注册页面...")
-                await self.page.goto('https://business.gemini.com', wait_until='networkidle')
-                await asyncio.sleep(2)
-                await self.page.screenshot(path=f"step1_open_reg_{email_prefix}.png", full_page=True)
+                await self.page.goto('https://business.gemini.google', wait_until='networkidle')
                 
                 logger.info(f"正在输入邮箱: {email}")
-                email_locator = self.page.locator('#email-input')
-                await email_locator.wait_for(state='visible', timeout=30000)
-                # 强行获取绝对焦点
-                await email_locator.click()
-                await asyncio.sleep(0.5)
-                # 物理级模拟击键
-                await email_locator.press_sequentially(email, delay=100)
+                await self.page.wait_for_selector('#email-input', timeout=30000)
+                # 模拟人类打字延迟
+                await self.page.type('#email-input', email, delay=100)
                 await asyncio.sleep(2)
-                await self.page.screenshot(path=f"step2_input_email_{email_prefix}.png", full_page=True)
                 
                 # 点击继续并等待页面响应
                 await self.page.click('#log-in-button')
@@ -246,7 +238,7 @@ class GeminiRegistrar:
                 await asyncio.sleep(5)
                 
                 # 建立视觉观测探针：截取当前屏幕状态
-                debug_img = f"debug_screenshot_{email_prefix}.png"
+                debug_img = f"debug_screenshot_{email.split('@')[0]}.png"
                 await self.page.screenshot(path=debug_img, full_page=True)
                 logger.info(f"⚠️ 已保存交互后屏幕快照: {debug_img} (若收不到验证码，请务必查看此图分析是否被阻断)")
                 
@@ -256,26 +248,18 @@ class GeminiRegistrar:
                     raise Exception("未收到验证码，请检查流水线 Artifacts 中的截图")
                 
                 logger.info(f"正在输入验证码: {code}")
-                pin_locator = self.page.locator('input[name="pinInput"]')
-                await pin_locator.wait_for(state='visible', timeout=30000)
-                await pin_locator.click()
-                await asyncio.sleep(0.5)
-                await pin_locator.press_sequentially(code, delay=100)
+                await self.page.wait_for_selector('input[name="pinInput"]', timeout=30000)
+                await self.page.type('input[name="pinInput"]', code, delay=100)
                 await asyncio.sleep(1)
-                await self.page.screenshot(path=f"step3_input_code_{email_prefix}.png", full_page=True)
                 
                 await self.page.click('button[jsname="XooR8e"]')
                 await asyncio.sleep(3)
                 
                 logger.info("正在输入姓名...")
-                name_locator = self.page.locator('input[formcontrolname="fullName"]')
-                await name_locator.wait_for(state='visible', timeout=15000)
+                await self.page.wait_for_selector('input[formcontrolname="fullName"]', timeout=15000)
                 fullname = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
-                await name_locator.click()
-                await asyncio.sleep(0.5)
-                await name_locator.press_sequentially(fullname, delay=100)
+                await self.page.type('input[formcontrolname="fullName"]', fullname, delay=100)
                 await asyncio.sleep(1)
-                await self.page.screenshot(path=f"step4_input_name_{email_prefix}.png", full_page=True)
                 
                 await self.page.click('button.agree-button')
                 
