@@ -2,6 +2,16 @@
 """
 GeminiForge (原 gtgm) - Gemini Business 账号注册机
 专为GitHub Actions无头环境设计，使用Playwright替代DrissionPage
+
+环境变量配置:
+  - WORKER_DOMAIN: 邮箱Worker域名
+  - EMAIL_DOMAIN: 邮箱域名  
+  - ADMIN_PASSWORD: 管理密码
+  - SYNC_URL: 同步API地址
+  - SYNC_KEY: 同步API密钥
+  - REGISTER_COUNT: 注册数量 (默认1)
+  - CONCURRENT: 并发数 (默认1)
+  - PROXY: 代理地址 (可选，如 http://user:pass@host:port)
 """
 
 import os
@@ -18,7 +28,6 @@ import logging
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from playwright_stealth import Stealth  # 核心修正：导入最新的 Stealth 类
 
 # 配置日志双写：强制物理落盘 + 终端输出
 logging.basicConfig(
@@ -33,10 +42,13 @@ console.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)
 logging.getLogger('').addHandler(console)
 logger = logging.getLogger(__name__)
 
+# 全局代理配置
 PROXY = os.environ.get('PROXY', '')
+
 
 @dataclass
 class CredentialData:
+    """凭证数据"""
     email: str = ""
     csesidx: str = ""
     config_id: str = ""
@@ -44,6 +56,7 @@ class CredentialData:
     c_oses: str = ""
     
     def to_dict(self) -> dict:
+        """导出为同步格式"""
         expires_at = (datetime.now() + timedelta(hours=20)).strftime("%Y-%m-%d %H:%M:%S")
         return {
             "id": self.email,
@@ -55,9 +68,13 @@ class CredentialData:
         }
     
     def is_complete(self) -> bool:
+        """检查数据是否完整"""
         return all([self.csesidx, self.config_id, self.c_ses, self.c_oses])
 
+
 class EmailManager:
+    """邮箱管理器"""
+    
     def __init__(self, worker_domain: str, email_domain: str, admin_password: str):
         self.worker_domain = re.sub(r'^https?://', '', worker_domain).rstrip('/')
         self.email_domain = email_domain
@@ -144,7 +161,10 @@ class EmailManager:
         
         return None
 
+
 class GeminiRegistrar:
+    """使用Playwright的注册机"""
+    
     def __init__(self, email_config: Dict):
         self.email_config = email_config
         self.credential = CredentialData()
@@ -165,9 +185,11 @@ class GeminiRegistrar:
             if not email:
                 raise Exception("创建邮箱失败")
             self.credential.email = email
+            email_prefix = email.split('@')[0]
             
             logger.info("正在启动浏览器...")
             async with async_playwright() as p:
+                # 注入强效的反自动化侦测参数
                 launch_args = {
                     'headless': True,
                     'args': [
@@ -197,53 +219,63 @@ class GeminiRegistrar:
                     java_script_enabled=True,
                     bypass_csp=True
                 )
-                
-                # 核心修正：适配最新 playwright-stealth v2.0+ API
-                # 将隐匿特征直接挂载到 Context 级，抹除所有衍生 Page 的指纹
-                stealth = Stealth()
-                await stealth.apply_stealth_async(context)
+                # 覆盖 Webdriver 标识
+                await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 
                 self.page = await context.new_page()
                 
                 logger.info("正在打开注册页面...")
                 await self.page.goto('https://business.gemini.com', wait_until='networkidle')
+                await asyncio.sleep(2)
+                await self.page.screenshot(path=f"step1_open_reg_{email_prefix}.png", full_page=True)
                 
                 logger.info(f"正在输入邮箱: {email}")
-                await self.page.wait_for_selector('#email-input', timeout=30000)
-                
-                # 拟人化交互
-                await self.page.locator('#email-input').click()
-                await self.page.locator('#email-input').type(email, delay=120)
+                email_locator = self.page.locator('#email-input')
+                await email_locator.wait_for(state='visible', timeout=30000)
+                # 强行获取绝对焦点
+                await email_locator.click()
+                await asyncio.sleep(0.5)
+                # 物理级模拟击键
+                await email_locator.press_sequentially(email, delay=100)
                 await asyncio.sleep(2)
+                await self.page.screenshot(path=f"step2_input_email_{email_prefix}.png", full_page=True)
                 
+                # 点击继续并等待页面响应
                 await self.page.click('#log-in-button')
                 logger.info("已点击登录按钮，等待目标站点响应...")
-                await asyncio.sleep(6)
+                await asyncio.sleep(5)
                 
-                debug_img = f"debug_screenshot_{email.split('@')[0]}.png"
+                # 建立视觉观测探针：截取当前屏幕状态
+                debug_img = f"debug_screenshot_{email_prefix}.png"
                 await self.page.screenshot(path=debug_img, full_page=True)
-                logger.info(f"⚠️ 交互快照已覆盖保存: {debug_img}")
+                logger.info(f"⚠️ 已保存交互后屏幕快照: {debug_img} (若收不到验证码，请务必查看此图分析是否被阻断)")
                 
                 logger.info("正在等待验证码...")
                 code = self.email_manager.check_verification_code(email)
                 if not code:
-                    raise Exception("未收到验证码，请检查 Artifacts 截图是否依旧被 Google 拦截")
+                    raise Exception("未收到验证码，请检查流水线 Artifacts 中的截图")
                 
                 logger.info(f"正在输入验证码: {code}")
-                await self.page.wait_for_selector('input[name="pinInput"]', timeout=30000)
-                await self.page.locator('input[name="pinInput"]').click()
-                await self.page.locator('input[name="pinInput"]').type(code, delay=100)
+                pin_locator = self.page.locator('input[name="pinInput"]')
+                await pin_locator.wait_for(state='visible', timeout=30000)
+                await pin_locator.click()
+                await asyncio.sleep(0.5)
+                await pin_locator.press_sequentially(code, delay=100)
                 await asyncio.sleep(1)
+                await self.page.screenshot(path=f"step3_input_code_{email_prefix}.png", full_page=True)
                 
                 await self.page.click('button[jsname="XooR8e"]')
                 await asyncio.sleep(3)
                 
                 logger.info("正在输入姓名...")
-                await self.page.wait_for_selector('input[formcontrolname="fullName"]', timeout=15000)
+                name_locator = self.page.locator('input[formcontrolname="fullName"]')
+                await name_locator.wait_for(state='visible', timeout=15000)
                 fullname = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
-                await self.page.locator('input[formcontrolname="fullName"]').click()
-                await self.page.locator('input[formcontrolname="fullName"]').type(fullname, delay=100)
+                await name_locator.click()
+                await asyncio.sleep(0.5)
+                await name_locator.press_sequentially(fullname, delay=100)
                 await asyncio.sleep(1)
+                await self.page.screenshot(path=f"step4_input_name_{email_prefix}.png", full_page=True)
                 
                 await self.page.click('button.agree-button')
                 
@@ -278,7 +310,10 @@ class GeminiRegistrar:
             logger.error(f"❌ 注册失败: {e}")
             return False
 
+
 class CredentialSyncer:
+    """凭证同步器"""
+    
     def __init__(self, base_url: str, admin_key: str):
         base_url = base_url.rstrip('/')
         if not base_url.startswith(('http://', 'https://')):
@@ -323,6 +358,7 @@ class CredentialSyncer:
             logger.info("步骤 2/4: 获取现有凭证...")
             res = self._request('get', f"{self.base_url}/admin/accounts-config")
             existing = res.json().get('accounts', []) if res.status_code == 200 else []
+            logger.info(f"获取到 {len(existing)} 个现有账户")
             
             logger.info("步骤 3/4: 合并凭证...")
             accounts_dict = {a['id']: a for a in existing if a.get('id')}
@@ -330,6 +366,7 @@ class CredentialSyncer:
                 if account.get('id'):
                     accounts_dict[account['id']] = account
             merged = list(accounts_dict.values())
+            logger.info(f"合并后共 {len(merged)} 个账户")
             
             logger.info("步骤 4/4: 上传凭证...")
             res = self._request('put', f"{self.base_url}/admin/accounts-config",
@@ -345,6 +382,7 @@ class CredentialSyncer:
             logger.error(f"同步失败: {e}")
             return False
 
+
 async def register_worker(worker_id: int, email_config: Dict) -> Optional[Dict]:
     logger.info(f"[Worker-{worker_id}] 开始注册...")
     registrar = GeminiRegistrar(email_config)
@@ -357,9 +395,11 @@ async def register_worker(worker_id: int, email_config: Dict) -> Optional[Dict]:
         logger.info(f"[Worker-{worker_id}] ❌ 失败")
         return None
 
+
 async def register_worker_with_sem(sem: asyncio.Semaphore, worker_id: int, email_config: Dict) -> Optional[Dict]:
     async with sem:
         return await register_worker(worker_id, email_config)
+
 
 async def main():
     global PROXY
@@ -436,6 +476,7 @@ async def main():
             logger.info("执行清理: 终止后台 sing-box 进程...")
             proxy_process.terminate()
             proxy_process.wait(timeout=3)
+
 
 if __name__ == '__main__':
     asyncio.run(main())
