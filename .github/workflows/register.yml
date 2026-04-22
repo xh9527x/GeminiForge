@@ -14,7 +14,9 @@ on:
         type: string
   schedule:
     # 每6小时运行一次 (UTC 00:00, 06:00, 12:00, 18:00)
-    - cron: '0 */6 * * *'
+    #- cron: '0 */6 * * *'
+    # 每30天运行一次 (每月1号 00:00 运行)
+    - cron: '0 0 1 * *'
 
 env:
   WORKER_DOMAIN: ${{ secrets.WORKER_DOMAIN }}
